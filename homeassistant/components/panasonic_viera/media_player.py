@@ -1,18 +1,24 @@
 """Support for interface with a Panasonic Viera TV."""
 import logging
+import asyncio
 
 import voluptuous as vol
 
 from homeassistant.components.media_player import (
     MediaPlayerDevice, PLATFORM_SCHEMA)
 from homeassistant.components.media_player.const import (
-    MEDIA_TYPE_URL, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
-    SUPPORT_PLAY, SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK, SUPPORT_STOP,
-    SUPPORT_TURN_OFF, SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_SET,
-    SUPPORT_VOLUME_STEP)
+    MEDIA_TYPE_URL, MEDIA_TYPE_VIDEO, MEDIA_TYPE_MUSIC, SUPPORT_NEXT_TRACK,
+    SUPPORT_PAUSE, SUPPORT_PLAY, SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK,
+    SUPPORT_STOP, SUPPORT_TURN_OFF, SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE,
+    SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP)
 from homeassistant.const import (
-    CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT, STATE_OFF, STATE_ON)
+    CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT, STATE_OFF, STATE_ON, STATE_PLAYING, STATE_IDLE)
 import homeassistant.helpers.config_validation as cv
+
+import homeassistant.components as core
+from homeassistant.core import split_entity_id
+from homeassistant.helpers.event import (async_track_state_change,
+                                         async_track_time_change)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,20 +64,20 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
             uuid = None
         remote = RemoteControl(host, port)
         add_entities([PanasonicVieraTVDevice(
-            mac, name, remote, host, app_power, uuid)])
+            mac, name, remote, host, app_power, hass, uuid)])
         return True
 
     host = config.get(CONF_HOST)
     remote = RemoteControl(host, port)
 
-    add_entities([PanasonicVieraTVDevice(mac, name, remote, host, app_power)])
+    add_entities([PanasonicVieraTVDevice(mac, name, remote, host, app_power, hass)])
     return True
 
 
 class PanasonicVieraTVDevice(MediaPlayerDevice):
     """Representation of a Panasonic Viera TV."""
 
-    def __init__(self, mac, name, remote, host, app_power, uuid=None):
+    def __init__(self, mac, name, remote, host, app_power, hass, uuid=None):
         """Initialize the Panasonic device."""
         import wakeonlan
         # Save a reference to the imported class
@@ -86,6 +92,10 @@ class PanasonicVieraTVDevice(MediaPlayerDevice):
         self._host = host
         self._volume = 0
         self._app_power = app_power
+        self._hass = hass
+        self._dlna_ready = False
+        self._dlna_domain = "media_player"
+        self._dlna_entity = "media_player.42as650_series_2" #Get this any how from discovery?
 
     @property
     def unique_id(self) -> str:
@@ -98,8 +108,19 @@ class PanasonicVieraTVDevice(MediaPlayerDevice):
             self._muted = self._remote.get_mute()
             self._volume = self._remote.get_volume() / 100
             self._state = STATE_ON
+
+            self._dlna_ready = False
+            if self._hass.states.is_state(self._dlna_entity, STATE_IDLE) == True:
+                self._state = STATE_IDLE
+                self._dlna_ready = True
+            elif self._hass.states.is_state(self._dlna_entity, STATE_PLAYING) == True:
+                self._state = STATE_PLAYING
+                self._dlna_ready = True
+            _LOGGER.debug('DLNA Rady = %s', self._dlna_ready)
+
         except OSError:
             self._state = STATE_OFF
+            self._dlna_ready = False
 
     def send_key(self, key):
         """Send a key to the tv and handles exceptions."""
@@ -199,7 +220,7 @@ class PanasonicVieraTVDevice(MediaPlayerDevice):
         """Send the previous track command."""
         self._remote.media_previous_track()
 
-    def play_media(self, media_type, media_id, **kwargs):
+    async def async_play_media(self, media_type, media_id, **kwargs):
         """Play media."""
         _LOGGER.debug("Play media: %s (%s)", media_id, media_type)
 
@@ -208,6 +229,18 @@ class PanasonicVieraTVDevice(MediaPlayerDevice):
                 self._remote.open_webpage(media_id)
             except (TimeoutError, OSError):
                 self._state = STATE_OFF
+
+        elif (media_type == MEDIA_TYPE_VIDEO) or (media_type == MEDIA_TYPE_MUSIC):
+            if self._dlna_ready == True:
+                try:
+                    dlna_service = "play_media"
+                    data = {"entity_id": self._dlna_entity, "media_content_type": media_type, "media_content_id": media_id}
+                    await self._hass.services.async_call(self._dlna_domain, dlna_service, data)
+                except (TimeoutError, OSError):
+                    _LOGGER.warning("No response from dlna!")
+            else:
+                _LOGGER.warning("DLNA is not Ready!" )
+
         else:
             _LOGGER.warning("Unsupported media_type: %s", media_type)
 
