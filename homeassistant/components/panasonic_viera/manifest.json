@@ -6,6 +6,6 @@
     "panasonic_viera==0.3.2",
     "wakeonlan==1.1.6"
   ],
-  "dependencies": [dlna_dmr],
+  "dependencies": ["dlna_dmr"],
   "codeowners": []
 }
